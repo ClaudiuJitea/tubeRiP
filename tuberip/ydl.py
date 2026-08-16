@@ -176,7 +176,8 @@ def ydl_opts_from_values(
 ) -> dict[str, Any]:
     argv = build_argv(values, playlist=playlist)
     opts = parse_ydl_opts(argv)
-    opts["no_color"] = True
+    # `color` is already set by the parser; adding `no_color` makes yt-dlp warn.
+    opts["color"] = {"stdout": "no_color", "stderr": "no_color"}
     opts["noprogress"] = True
     if extra:
         opts.update(extra)
@@ -246,7 +247,7 @@ def fetch_opts_from_values(values: dict[str, Any]) -> dict[str, Any]:
         {
             "skip_download": True,
             "quiet": True,
-            "no_color": True,
+            "color": {"stdout": "no_color", "stderr": "no_color"},
             "noprogress": True,
             "extract_flat": "in_playlist",
             "noplaylist": False,
@@ -312,17 +313,44 @@ def is_http_403(message: str) -> bool:
     return "403" in text or "forbidden" in text
 
 
-def youtube_retry_values(values: dict[str, Any]) -> dict[str, Any]:
+#: A 403 on the media URL is usually transient: YouTube hands out a signed URL
+#: that it then rejects. yt-dlp only retries 5xx responses, so the whole job has
+#: to run again to force a fresh extraction with new URLs.
+MAX_403_ATTEMPTS = 3
+
+
+def youtube_retry_values(values: dict[str, Any], attempt: int = 1) -> dict[str, Any]:
+    """Options for retry `attempt` after a 403; attempt 1 is the first retry."""
     retry = dict(values)
-    retry["cookies"] = ""
-    retry["cookies_from_browser"] = ""
-    retry["check_formats"] = "--check-formats"
-    retry["extractor_args"] = ""
-    extra = retry.get("extra_args") or ""
-    # Drop user extractor-args that can pin a 403-prone YouTube client.
-    extra = extra.replace("--check-formats", "").strip()
-    retry["extra_args"] = extra
+    # Signed-in requests are pinned to clients that often need a PO token, so the
+    # first retry drops cookies. Later retries just re-extract for fresh URLs.
+    if used_cookies(values):
+        retry["cookies"] = ""
+        retry["cookies_from_browser"] = ""
     return retry
+
+
+def used_cookies(values: dict[str, Any]) -> bool:
+    return bool((values.get("cookies") or "").strip() or (values.get("cookies_from_browser") or "").strip())
+
+
+def describe_403(values: dict[str, Any], attempts: int) -> str:
+    """Explain a 403 that survived every retry, based on the actual environment."""
+    tries = "try" if attempts == 1 else f"{attempts} tries"
+    if not detect_js_runtimes():
+        return (
+            f"YouTube refused the media URL (HTTP 403) after {tries}. No JavaScript runtime was found - "
+            "install Node.js or Deno so yt-dlp can solve YouTube's signature challenge."
+        )
+    if used_cookies(values):
+        return (
+            f"YouTube refused the media URL (HTTP 403) after {tries}, including one without cookies. "
+            "This is usually temporary; wait a moment and retry, or set Cookies to 'No cookies'."
+        )
+    return (
+        f"YouTube refused the media URL (HTTP 403) after {tries}. "
+        "This is usually temporary - wait a moment and retry the job."
+    )
 
 
 def is_video_only(fmt: dict[str, Any]) -> bool:
@@ -368,7 +396,7 @@ def summarize_ydl_failure(logger: SignalLogger, code: int | None = None) -> str:
         text = re.sub(r"\x1b\[[0-9;]*m", "", raw).strip()
         text = re.sub(r"^WARNING:\s*", "", text)
         if text and "javascript runtime" in text.lower():
-            return "YouTube blocked the download (HTTP 403). Enable a JS runtime such as Node.js or Deno."
+            return "No JavaScript runtime was found; install Node.js or Deno so YouTube formats stay available."
         if text:
             return text
     if code:

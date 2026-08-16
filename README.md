@@ -93,6 +93,14 @@ tubeRiP/
     widgets/          sidebar, job cards, option form
 ```
 
+## Troubleshooting
+
+**HTTP 403 on some videos.** YouTube sometimes hands out a signed media URL and then rejects it. yt-dlp only retries server errors, so tubeRiP retries the whole job (up to three attempts) to force a fresh extraction. The first retry drops cookies, because signed-in requests are pinned to clients that often need a PO token. If a video still fails, wait a moment and retry, or set **Cookies** to *No cookies* on the Download page.
+
+**Missing formats or repeated 403s.** Current YouTube extraction needs a JavaScript runtime. Install [Node.js](https://nodejs.org/) or [Deno](https://deno.com/); tubeRiP finds it automatically, including versions managed by nvm, fnm, or Volta.
+
+**Merging or MP3 conversion fails.** Install ffmpeg and make sure it is on `PATH`. The status bar shows whether ffmpeg was found.
+
 ## Notes
 
 Use tubeRiP only with media you have the right to download. Site terms and copyright still apply. tubeRiP wraps yt-dlp; it does not bypass access controls beyond what yt-dlp already supports with your own cookies and credentials.

@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from tuberip.util import is_playlist, playlist_entries
 from tuberip.ydl import (
+    MAX_403_ATTEMPTS,
     DownloadCancelled,
     SignalLogger,
+    describe_403,
     ensure_js_runtimes_on_path,
     fetch_opts_from_values,
     is_http_403,
     summarize_ydl_failure,
+    used_cookies,
     ydl_opts_from_values,
     youtube_retry_values,
 )
@@ -89,9 +93,9 @@ class DownloadWorker(QThread):
             self.failed.emit(f"yt-dlp is not available: {exc}")
             return
         ensure_js_runtimes_on_path()
-        attempts = [self.values]
+        values = self.values
         last_error = ""
-        for index, values in enumerate(attempts):
+        for attempt in range(MAX_403_ATTEMPTS):
             if self._cancel:
                 self.failed.emit("Cancelled")
                 return
@@ -103,15 +107,31 @@ class DownloadWorker(QThread):
             if self._cancel:
                 self.failed.emit("Cancelled")
                 return
-            if index == 0 and is_http_403(error):
-                self.log.emit("warning", "YouTube returned HTTP 403; retrying and skipping blocked formats…")
-                attempts.append(youtube_retry_values(self.values))
-        if is_http_403(last_error):
-            last_error = (
-                "YouTube blocked the media URL (HTTP 403). "
-                "Fully quit tubeRiP and run it again so it can use Node to unlock the stream."
+            if not is_http_403(error) or attempt == MAX_403_ATTEMPTS - 1:
+                break
+            next_values = youtube_retry_values(values, attempt + 1)
+            detail = " without cookies" if used_cookies(values) and not used_cookies(next_values) else ""
+            self.log.emit(
+                "warning",
+                f"YouTube returned HTTP 403; retrying{detail} "
+                f"({attempt + 2} of {MAX_403_ATTEMPTS}) with a fresh extraction…",
             )
+            values = next_values
+            if not self._sleep(2 + 2 * attempt):
+                self.failed.emit("Cancelled")
+                return
+        if is_http_403(last_error):
+            last_error = describe_403(self.values, MAX_403_ATTEMPTS)
         self.failed.emit(last_error or "Download failed")
+
+    def _sleep(self, seconds: float) -> bool:
+        """Back off between retries, returning False if the job was cancelled."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if self._cancel:
+                return False
+            self.msleep(100)
+        return not self._cancel
 
     def _download_once(self, yt_dlp, values: dict[str, Any]) -> str | None:
         try:
